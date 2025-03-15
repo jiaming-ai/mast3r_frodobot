@@ -137,7 +137,7 @@ def est_pose(ride_path, start_idx=0, end_idx=None, interval=1, visualize=True, d
     matching_conf_thr = 5.0
     
     # Scene graph parameters
-    scenegraph_type = 'complete' # 'swin'
+    scenegraph_type = 'swin'
     winsize = 3
     win_cyclic = False
     refid = 0
@@ -495,6 +495,7 @@ def main(ride_path, num_threads=4):
         ride_path: Path containing multiple ride directories
         num_threads: Number of threads/GPUs to use
     """
+    N_THREAD_PER_GPU = 4
     
     # Get all ride directories
     ride_dirs = []
@@ -503,9 +504,9 @@ def main(ride_path, num_threads=4):
             ride_dirs.append(os.path.join(ride_path, dir))
     
     # Split directories into chunks for each thread
-    chunks = [[] for _ in range(num_threads)]
+    chunks = [[] for _ in range(num_threads*N_THREAD_PER_GPU)]
     for i, dir_path in enumerate(ride_dirs):
-        chunks[i % num_threads].append(dir_path)
+        chunks[i % (num_threads*N_THREAD_PER_GPU)].append(dir_path)
     
     # Define worker function for each thread
     def worker(dirs, gpu_id):
@@ -520,9 +521,9 @@ def main(ride_path, num_threads=4):
     
     # Create and start threads
     threads = []
-    for i in range(num_threads):
+    for i in range(num_threads*N_THREAD_PER_GPU):
         if len(chunks[i]) > 0:  # Only create threads for non-empty chunks
-            t = threading.Thread(target=worker, args=(chunks[i], i))
+            t = threading.Thread(target=worker, args=(chunks[i], i // N_THREAD_PER_GPU))
             threads.append(t)
             t.start()
     
@@ -534,7 +535,7 @@ def main(ride_path, num_threads=4):
 
 if __name__ == "__main__":
     # Example usage with 4 threads/GPUs
-    main("data/filtered_2k", num_threads=4)
+    main("data/filtered_2k", num_threads=1)
     # Or process a single directory
     # est_pose("data/filtered_2k/ride_16641_20240119024450", 0, 50, visualize=True)
 
