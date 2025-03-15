@@ -1,0 +1,541 @@
+import os
+import threading
+import pickle
+import shutil
+import tempfile
+
+import numpy as np
+from mast3r.cloud_opt.sparse_ga import sparse_global_alignment
+
+from mast3r.model import AsymmetricMASt3R
+from dust3r.image_pairs import make_pairs
+from dust3r.utils.image import load_images
+import copy
+
+import matplotlib.pyplot as plt
+import cv2
+
+def est_pose(ride_path, start_idx=0, end_idx=None, interval=1, visualize=True, device="cuda"):
+    """
+    Load a ride from a directory and reconstruct the scene.
+    
+    Args:
+        ride_path: Path to the ride directory
+        start_idx: Starting index for image selection
+        end_idx: Ending index for image selection (None means all images)
+        interval: Interval between selected images
+        visualize: Whether to visualize odometry comparison
+        
+    Returns:
+        scene: Reconstructed scene
+    """
+    # Device and model settings
+    image_size = 512
+    silent = False
+
+    # Load model
+    model_name = "MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric"
+    weights_path = "naver/" + model_name
+    model = AsymmetricMASt3R.from_pretrained(weights_path).to(device)
+
+    # Load images
+    image_dir = os.path.join(ride_path, 'img')
+    all_img_files = [os.path.join(image_dir, f) for f in os.listdir(image_dir) 
+                if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+    if end_idx is None:
+        end_idx = len(all_img_files)
+    end_idx = min(end_idx, len(all_img_files))
+    recon_idxs = np.arange(start_idx, end_idx, interval)
+
+    filelist = []
+    for i, idx in enumerate(recon_idxs):
+        filelist.append(os.path.join(ride_path, 'img', f'{idx}.jpg'))
+    
+    odom_file = os.path.join(ride_path, 'traj_data.pkl')
+    with open(odom_file, 'rb') as f:
+        odom_data = pickle.load(f)
+   
+    # Get delta odom
+    delta_odom = []
+    for i in range(len(recon_idxs) - 1):  # Exclude the last index
+        idx_current = recon_idxs[i]
+        idx_next = recon_idxs[i + 1]
+        
+        # Current pose
+        x_current = odom_data['pos'][idx_current][0]
+        y_current = odom_data['pos'][idx_current][1]
+        theta_current = odom_data['yaw'][idx_current]
+        
+        # Next pose in world frame
+        x_next = odom_data['pos'][idx_next][0]
+        y_next = odom_data['pos'][idx_next][1]
+        theta_next = odom_data['yaw'][idx_next]
+        
+        # Global displacement
+        dx_global = x_next - x_current
+        dy_global = y_next - y_current
+        
+        # Convert global displacement to local frame
+        cos_theta = np.cos(theta_current)
+        sin_theta = np.sin(theta_current)
+        
+        # Rotation matrix from world to local frame
+        dx_local = cos_theta * dx_global + sin_theta * dy_global
+        dy_local = -sin_theta * dx_global + cos_theta * dy_global
+        
+        # Angular change (normalized to [-pi, pi))
+        dtheta = theta_next - theta_current
+        dtheta = (dtheta + np.pi) % (2 * np.pi) - np.pi
+        
+        delta_odom.append({
+            "from": idx_current,
+            "to": idx_next,
+            "dx": dx_local,
+            "dy": dy_local,
+            "dtheta": dtheta,
+            "timestamp_from": odom_data['timestamps'][idx_current],
+            "timestamp_to": odom_data['timestamps'][idx_next],
+        })
+        
+        print(f"From {idx_current} to {idx_next}")
+        print(f"delta_odom: {delta_odom[-1]['dx']:.2f}, {delta_odom[-1]['dy']:.2f}, {delta_odom[-1]['dtheta']:.2f}")
+        print(f"distance: {np.sqrt(delta_odom[-1]['dx']**2 + delta_odom[-1]['dy']**2):.2f}")
+        print(f"--------------------------------")
+    
+     # get compass data
+    print(f"Getting compass data")
+    compass_file = os.path.join(ride_path, 'compass_calibrated.pkl')
+    with open(compass_file, 'rb') as f:
+        compass_data = pickle.load(f)
+    
+    for delta_odom_item in delta_odom:
+        timestamp_from = delta_odom_item['timestamp_from']
+        timestamp_to = delta_odom_item['timestamp_to']
+
+        head_idx_from = np.argmin(np.abs(compass_data[:,1] - timestamp_from))
+        head_idx_to = np.argmin(np.abs(compass_data[:,1] - timestamp_to))
+
+        # replace the dtheta with delta heading from compass
+        d_heading = compass_data[head_idx_to, 0] - compass_data[head_idx_from, 0]
+        # 3. normalize to [-pi, pi)
+        d_heading = (d_heading + np.pi) % (2 * np.pi) - np.pi
+
+        delta_odom_item['dtheta'] = d_heading
+        print(f"d_heading from {delta_odom_item['from']} to {delta_odom_item['to']}: {d_heading:.2f}")
+    
+    # Set parameters
+    outdir = os.path.join(ride_path, 'reconstruction')
+    os.makedirs(outdir, exist_ok=True)
+    
+    # Optimization parameters
+    optim_level = 'refine+depth'
+    lr1 = 0.07
+    niter1 = 500
+    lr2 = 0.014
+    niter2 = 200
+    min_conf_thr = 1.5
+    matching_conf_thr = 5.0
+    
+    # Scene graph parameters
+    scenegraph_type = 'complete' # 'swin'
+    winsize = 3
+    win_cyclic = False
+    refid = 0
+    
+    # Visualization parameters
+    as_pointcloud = True
+    mask_sky = False
+    clean_depth = True
+    transparent_cams = False
+    cam_size = 0.2
+    TSDF_thresh = 0.0
+    shared_intrinsics = True 
+    
+    # Load and process images
+    imgs = load_images(filelist, size=image_size, verbose=not silent)
+    if len(imgs) == 1:
+        imgs = [imgs[0], copy.deepcopy(imgs[0])]
+        imgs[1]['idx'] = 1
+        filelist = [filelist[0], filelist[0] + '_2']
+
+    # Create scene graph
+    scene_graph_params = [scenegraph_type]
+    if scenegraph_type in ["swin", "logwin"]:
+        scene_graph_params.append(str(winsize))
+    elif scenegraph_type == "oneref":
+        scene_graph_params.append(str(refid))
+    if scenegraph_type in ["swin", "logwin"] and not win_cyclic:
+        scene_graph_params.append('noncyclic')
+    scene_graph = '-'.join(scene_graph_params)
+    
+    # Create image pairs
+    pairs = make_pairs(imgs, scene_graph=scene_graph, prefilter=None, symmetrize=True)
+    if optim_level == 'coarse':
+        niter2 = 0
+        
+    # Set up cache directory
+    cache_dir = os.path.join(outdir, 'cache')
+    os.makedirs(cache_dir, exist_ok=True)
+    
+    # Run sparse global alignment
+    scene = sparse_global_alignment(filelist, pairs, cache_dir,
+                                    model, lr1=lr1, niter1=niter1, lr2=lr2, niter2=niter2, device=device,
+                                    opt_depth='depth' in optim_level, shared_intrinsics=shared_intrinsics,
+                                    matching_conf_thr=matching_conf_thr, odometry_data=delta_odom, lora_depth=dict(k=96, gamma=15, min_norm=.5),
+                                    odometry_weight=0.4,scale_weight=1)
+    # scene.show()
+
+    # save cam2w
+    cam2w = scene.cam2w.cpu().numpy()
+    np.save(os.path.join(ride_path, 'cam2w.npy'), cam2w)
+
+    # recon_odom = extract_odometry_from_cam2w(scene.cam2w.cpu().numpy())
+    # print(recon_odom)
+    
+    # # Visualize odometry comparison if requested
+    # if visualize:
+    #     selected_pos = odom_data['pos'][recon_idxs]
+    #     selected_yaw = odom_data['yaw'][recon_idxs]
+    #     selected_odom_data = {
+    #         'pos': selected_pos,
+    #         'yaw': selected_yaw
+    #     }
+    #     vis_outdir = os.path.join(outdir, 'odometry_visualization')
+    #     visualize_odometry_comparison(
+    #         original_odom_data=selected_odom_data,
+    #         recon_odom_data=recon_odom,
+    #         image_files=filelist,
+    #         output_dir=vis_outdir
+    #     )
+    
+    # shutil.rmtree(outdir)
+    
+    return scene.sparse_ga if hasattr(scene, 'sparse_ga') else scene
+
+def extract_odometry_from_cam2w(cam2w_matrices):
+    """
+    Extract odometry from a list of camera-to-world transformation matrices.
+    
+    Args:
+        cam2w_matrices: List of Nx4x4 camera-to-world transformation matrices
+        z_weight: Weight for the z component (default: 1.0)
+        
+    Returns:
+        Dictionary containing:
+            - pos: List of [x, y] positions in odometry frame
+            - yaw: List of yaw angles in odometry frame
+    """
+    if len(cam2w_matrices) == 0:
+        return {'pos': [], 'yaw': []}
+    
+    # Initialize lists to store positions and orientations
+    positions = []
+    yaws = []
+    
+    # Process each matrix to get positions and orientations in world frame
+    for matrix in cam2w_matrices:
+        # Extract rotation and translation
+        R = matrix[:3, :3]
+        t = matrix[:3, 3]
+        
+        # Convert translation to odometry coordinate system
+        # Forward (odom x) is z in OpenCV
+        # Left (odom y) is -x in OpenCV
+        x = t[2]       # z is forward in OpenCV
+        y = -t[0]      # -x is left in OpenCV
+        
+        # Store position (x, y) in odometry frame
+        positions.append([x, y])
+        
+        # Calculate yaw (rotation around vertical axis)
+        # In odometry frame, yaw is rotation from x to y
+        # In OpenCV, this corresponds to rotation from z to -x
+        
+        # Get the forward direction in odometry (z-axis in OpenCV)
+        forward_vec = R[:, 2]  # z-axis in OpenCV
+        
+        
+        # Project vectors to the horizontal plane (x-y in odometry, z-x in OpenCV)
+        forward_2d = np.array([forward_vec[0], forward_vec[2]])  # [x_odo, y_odo]
+
+        yaw = np.arctan2(R[0, 2], R[2, 2])
+        # Calculate yaw as the angle between the forward vector and the x-axis
+        # yaw = np.arctan2(forward_2d[1], forward_2d[0])
+        yaws.append(yaw)
+    
+    # Make positions and orientations relative to the first frame
+    origin_pos = positions[0]
+    origin_yaw = yaws[0]
+    
+    # Create transformation matrix for the origin (first frame)
+    cos_origin = np.cos(-origin_yaw)
+    sin_origin = np.sin(-origin_yaw)
+    
+    # Initialize relative positions and yaws
+    relative_positions = []
+    relative_yaws = []
+    
+    for i, (pos, yaw) in enumerate(zip(positions, yaws)):
+        # Calculate position relative to origin
+        dx = pos[0] - origin_pos[0]
+        dy = pos[1] - origin_pos[1]
+        
+        # Rotate the relative position to the origin's frame
+        rel_x = cos_origin * dx + sin_origin * dy
+        rel_y = -sin_origin * dx + cos_origin * dy
+        
+        relative_positions.append([rel_x, rel_y])
+        
+        # Calculate relative yaw (difference in orientation)
+        rel_yaw = yaw - origin_yaw
+        rel_yaw = (rel_yaw + np.pi) % (2 * np.pi) - np.pi
+        relative_yaws.append(rel_yaw)
+    
+    return {
+        'pos': relative_positions,
+        'yaw': relative_yaws
+    }
+
+def visualize_odometry_comparison(
+    original_odom_data, 
+    recon_odom_data, 
+    image_files,
+    output_dir="./odometry_visualization",
+    camera_height=0.561,  # meters above ground
+):
+    """
+    Visualize comparison between original odometry and reconstructed odometry.
+    
+    Args:
+        scene: Reconstructed scene from est_pose
+        original_odom_data: Original odometry data dictionary with 'pos' and 'yaw'
+        recon_odom_data: Reconstructed odometry data dictionary with 'pos' and 'yaw'
+        image_files: List of image file paths
+        output_dir: Directory to save visualizations
+        camera_height: Height of camera above ground in meters
+    """
+    # Transform original odometry data to make first frame the origin
+    orig_positions = np.array(original_odom_data['pos'])
+    orig_yaws = np.array(original_odom_data['yaw'])
+    
+    # Get origin position and orientation
+    origin_pos = orig_positions[0].copy()
+    origin_yaw = orig_yaws[0]
+    
+    # Create transformation matrix for the origin
+    cos_origin = np.cos(origin_yaw)
+    sin_origin = np.sin(origin_yaw)
+    
+    # Initialize transformed positions and yaws
+    transformed_positions = []
+    transformed_yaws = []
+    
+    for i, (pos, yaw) in enumerate(zip(orig_positions, orig_yaws)):
+        # Calculate position relative to origin
+        dx = pos[0] - origin_pos[0]
+        dy = pos[1] - origin_pos[1]
+        
+        # Rotate the relative position to the origin's frame
+        rel_x = cos_origin * dx + sin_origin * dy
+        rel_y = -sin_origin * dx + cos_origin * dy
+        
+        transformed_positions.append([rel_x, rel_y])
+        
+        # Calculate relative yaw (difference in orientation)
+        rel_yaw = yaw - origin_yaw
+        rel_yaw = (rel_yaw + np.pi) % (2 * np.pi) - np.pi
+        transformed_yaws.append(rel_yaw)
+    
+    # Replace original data with transformed data
+    transformed_odom_data = {
+        'pos': transformed_positions,
+        'yaw': transformed_yaws
+    }
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Camera intrinsic matrix
+    K = np.array([
+        [203.93, 0, 192], 
+        [0, 203.933, 144], 
+        [0, 0, 1]
+    ])
+    
+    # Load images
+    images = []
+    for img_path in image_files:
+        img = cv2.imread(img_path)
+        if img is not None:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            img = cv2.resize(img, (384, 288))  # Resize to match K matrix
+            images.append(img)
+    
+    # Get positions from both odometry sources
+    orig_positions = np.array(transformed_odom_data['pos'])
+    recon_positions = np.array(recon_odom_data['pos'])
+    
+    # Create visualizations for each frame
+    n_waypoints = 10
+    for i in range(min(len(images), len(orig_positions), len(recon_positions))):
+        # Create figure with two subplots
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 7))
+        
+        # Get current image
+        current_image = images[i].copy()
+        
+        # Project future odometry points onto the image
+        for j in range(i+1, min(i+n_waypoints, len(orig_positions))):
+            # Calculate relative position from current frame
+            orig_rel_pos = orig_positions[j] - orig_positions[i]
+            recon_rel_pos = recon_positions[j] - recon_positions[i]
+            
+            # Rotate to current frame's orientation
+            orig_yaw = transformed_odom_data['yaw'][i]
+            recon_yaw = recon_odom_data['yaw'][i]
+            
+            # Rotation matrices
+            orig_rot = np.array([
+                [np.cos(orig_yaw), -np.sin(orig_yaw)],
+                [np.sin(orig_yaw), np.cos(orig_yaw)]
+            ])
+            recon_rot = np.array([
+                [np.cos(recon_yaw), -np.sin(recon_yaw)],
+                [np.sin(recon_yaw), np.cos(recon_yaw)]
+            ])
+            
+            # Transform to local coordinates
+            orig_local = orig_rot.T @ orig_rel_pos
+            recon_local = recon_rot.T @ recon_rel_pos
+            
+            # Project original odometry point
+            orig_camera = np.array([-orig_local[1], camera_height, orig_local[0]])
+            if orig_camera[2] > 0:  # Only project points in front of camera
+                orig_image = K @ orig_camera
+                orig_image = orig_image / orig_camera[2]
+                x, y = int(orig_image[0]), int(orig_image[1])
+                if 0 <= x < current_image.shape[1] and 0 <= y < current_image.shape[0]:
+                    # Original odometry in blue
+                    cv2.circle(current_image, (x, y), 5, (0, 0, 255), -1)
+            
+            # Project reconstructed odometry point
+            recon_camera = np.array([-recon_local[1], camera_height, recon_local[0]])
+            if recon_camera[2] > 0:  # Only project points in front of camera
+                recon_image = K @ recon_camera
+                recon_image = recon_image / recon_camera[2]
+                x, y = int(recon_image[0]), int(recon_image[1])
+                if 0 <= x < current_image.shape[1] and 0 <= y < current_image.shape[0]:
+                    # Reconstructed odometry in green
+                    cv2.circle(current_image, (x, y), 5, (0, 255, 0), -1)
+        
+        # Display image with projected waypoints
+        ax1.imshow(current_image)
+        ax1.set_title(f"Frame {i} with Projected Odometry")
+        ax1.axis('off')
+        
+        # Right subplot: Bird's-eye view of trajectory
+        # Plot original odometry trajectory
+        ax2.plot(orig_positions[:, 0], orig_positions[:, 1], 'b-', label='Original Odometry')
+        ax2.scatter(orig_positions[i, 0], orig_positions[i, 1], color='blue', marker='o', s=100)
+        
+        # Plot reconstructed odometry trajectory
+        ax2.plot(recon_positions[:, 0], recon_positions[:, 1], 'g-', label='Reconstructed Odometry')
+        ax2.scatter(recon_positions[i, 0], recon_positions[i, 1], color='green', marker='o', s=100)
+        
+        # Draw orientation arrows for current position
+        orig_arrow_len = 1.0
+        recon_arrow_len = 1.0
+        
+        # Original odometry orientation
+        orig_arrow_dx = orig_arrow_len * np.cos(transformed_odom_data['yaw'][i])
+        orig_arrow_dy = orig_arrow_len * np.sin(transformed_odom_data['yaw'][i])
+        ax2.arrow(orig_positions[i, 0], orig_positions[i, 1], 
+                 orig_arrow_dx, orig_arrow_dy, 
+                 head_width=0.2, head_length=0.3, fc='blue', ec='blue')
+        
+        # Reconstructed odometry orientation
+        recon_arrow_dx = recon_arrow_len * np.cos(recon_odom_data['yaw'][i])
+        recon_arrow_dy = recon_arrow_len * np.sin(recon_odom_data['yaw'][i])
+        ax2.arrow(recon_positions[i, 0], recon_positions[i, 1], 
+                 recon_arrow_dx, recon_arrow_dy, 
+                 head_width=0.2, head_length=0.3, fc='green', ec='green')
+        
+        # Set equal aspect ratio and add grid
+        ax2.set_aspect('equal')
+        ax2.grid(True)
+        ax2.set_title("Odometry Comparison (Global Frame)")
+        ax2.set_xlabel("x (meters)")
+        ax2.set_ylabel("y (meters)")
+        ax2.legend()
+        
+        # Set reasonable limits for the plot
+        all_x = np.concatenate([orig_positions[:, 0], recon_positions[:, 0]])
+        all_y = np.concatenate([orig_positions[:, 1], recon_positions[:, 1]])
+        x_min, x_max = all_x.min(), all_x.max()
+        y_min, y_max = all_y.min(), all_y.max()
+        
+        # Add some margin
+        x_margin = (x_max - x_min) * 0.1
+        y_margin = (y_max - y_min) * 0.1
+        ax2.set_xlim(x_min - x_margin, x_max + x_margin)
+        ax2.set_ylim(y_min - y_margin, y_max + y_margin)
+        
+        # Save figure
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f"odometry_comparison_frame_{i:03d}.png"), dpi=150)
+        plt.close(fig)
+    
+    print(f"Visualization complete. {len(images)} images saved to {output_dir}")
+
+def main(ride_path, num_threads=4):
+    """
+    Process multiple ride directories in parallel using multiple GPUs.
+    
+    Args:
+        ride_path: Path containing multiple ride directories
+        num_threads: Number of threads/GPUs to use
+    """
+    
+    # Get all ride directories
+    ride_dirs = []
+    for dir in os.listdir(ride_path):
+        if os.path.isdir(os.path.join(ride_path, dir)):
+            ride_dirs.append(os.path.join(ride_path, dir))
+    
+    # Split directories into chunks for each thread
+    chunks = [[] for _ in range(num_threads)]
+    for i, dir_path in enumerate(ride_dirs):
+        chunks[i % num_threads].append(dir_path)
+    
+    # Define worker function for each thread
+    def worker(dirs, gpu_id):
+        device = f"cuda:{gpu_id}"
+        print(f"Thread {gpu_id} processing {len(dirs)} directories on {device}")
+        for dir_path in dirs:
+            try:
+                print(f"Processing {dir_path} on {device}")
+                est_pose(dir_path, device=device)
+            except Exception as e:
+                print(f"Error processing {dir_path}: {e}")
+    
+    # Create and start threads
+    threads = []
+    for i in range(num_threads):
+        if len(chunks[i]) > 0:  # Only create threads for non-empty chunks
+            t = threading.Thread(target=worker, args=(chunks[i], i))
+            threads.append(t)
+            t.start()
+    
+    # Wait for all threads to complete
+    for t in threads:
+        t.join()
+    
+    print("All processing complete")
+
+if __name__ == "__main__":
+    # Example usage with 4 threads/GPUs
+    main("data/filtered_2k", num_threads=4)
+    # Or process a single directory
+    # est_pose("data/filtered_2k/ride_16641_20240119024450", 0, 50, visualize=True)
+
+
