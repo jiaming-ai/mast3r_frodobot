@@ -11,11 +11,13 @@ from mast3r.model import AsymmetricMASt3R
 from dust3r.image_pairs import make_pairs
 from dust3r.utils.image import load_images
 import copy
-
+import torch.multiprocessing as mp
 import matplotlib.pyplot as plt
 import cv2
+import logging
 
-def est_pose(ride_path, start_idx=0, end_idx=None, interval=1, visualize=True, device="cuda"):
+def est_pose(ride_path, start_idx=0, end_idx=None, interval=1, 
+             visualize=True, device="cuda", overwrite=False):
     """
     Load a ride from a directory and reconstruct the scene.
     
@@ -32,11 +34,6 @@ def est_pose(ride_path, start_idx=0, end_idx=None, interval=1, visualize=True, d
     # Device and model settings
     image_size = 512
     silent = False
-
-    # Load model
-    model_name = "MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric"
-    weights_path = "naver/" + model_name
-    model = AsymmetricMASt3R.from_pretrained(weights_path).to(device)
 
     # Load images
     image_dir = os.path.join(ride_path, 'img')
@@ -97,13 +94,13 @@ def est_pose(ride_path, start_idx=0, end_idx=None, interval=1, visualize=True, d
             "timestamp_to": odom_data['timestamps'][idx_next],
         })
         
-        print(f"From {idx_current} to {idx_next}")
-        print(f"delta_odom: {delta_odom[-1]['dx']:.2f}, {delta_odom[-1]['dy']:.2f}, {delta_odom[-1]['dtheta']:.2f}")
-        print(f"distance: {np.sqrt(delta_odom[-1]['dx']**2 + delta_odom[-1]['dy']**2):.2f}")
-        print(f"--------------------------------")
+        logging.debug(f"From {idx_current} to {idx_next}")
+        logging.debug(f"delta_odom: {delta_odom[-1]['dx']:.2f}, {delta_odom[-1]['dy']:.2f}, {delta_odom[-1]['dtheta']:.2f}")
+        logging.debug(f"distance: {np.sqrt(delta_odom[-1]['dx']**2 + delta_odom[-1]['dy']**2):.2f}")
+        logging.debug("--------------------------------")
     
      # get compass data
-    print(f"Getting compass data")
+    logging.debug(f"Getting compass data")
     compass_file = os.path.join(ride_path, 'compass_calibrated.pkl')
     with open(compass_file, 'rb') as f:
         compass_data = pickle.load(f)
@@ -121,7 +118,7 @@ def est_pose(ride_path, start_idx=0, end_idx=None, interval=1, visualize=True, d
         d_heading = (d_heading + np.pi) % (2 * np.pi) - np.pi
 
         delta_odom_item['dtheta'] = d_heading
-        print(f"d_heading from {delta_odom_item['from']} to {delta_odom_item['to']}: {d_heading:.2f}")
+        logging.debug(f"d_heading from {delta_odom_item['from']} to {delta_odom_item['to']}: {d_heading:.2f}")
     
     # Set parameters
     outdir = os.path.join(ride_path, 'reconstruction')
@@ -138,7 +135,7 @@ def est_pose(ride_path, start_idx=0, end_idx=None, interval=1, visualize=True, d
     
     # Scene graph parameters
     scenegraph_type = 'swin'
-    winsize = 3
+    winsize = 2
     win_cyclic = False
     refid = 0
     
@@ -177,40 +174,53 @@ def est_pose(ride_path, start_idx=0, end_idx=None, interval=1, visualize=True, d
     cache_dir = os.path.join(outdir, 'cache')
     os.makedirs(cache_dir, exist_ok=True)
     
-    # Run sparse global alignment
-    scene = sparse_global_alignment(filelist, pairs, cache_dir,
-                                    model, lr1=lr1, niter1=niter1, lr2=lr2, niter2=niter2, device=device,
-                                    opt_depth='depth' in optim_level, shared_intrinsics=shared_intrinsics,
-                                    matching_conf_thr=matching_conf_thr, odometry_data=delta_odom, lora_depth=dict(k=96, gamma=15, min_norm=.5),
-                                    odometry_weight=0.4,scale_weight=1)
-    # scene.show()
+    cam2w_file = os.path.join(ride_path, f'cam2w_{start_idx}_{end_idx}.npy')
+    if overwrite or not os.path.exists(cam2w_file):
+        logging.info(f"Estimating pose for {ride_path}, {start_idx} to {end_idx} on {device}")
+    
+        # Run sparse global alignment
+        # Load model
+        model_name = "MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric"
+        weights_path = "naver/" + model_name
+        model = AsymmetricMASt3R.from_pretrained(weights_path).to(device)
+        scene = sparse_global_alignment(filelist, pairs, cache_dir,
+                                        model, lr1=lr1, niter1=niter1, lr2=lr2, niter2=niter2, device=device,
+                                        opt_depth='depth' in optim_level, shared_intrinsics=shared_intrinsics,
+                                        matching_conf_thr=matching_conf_thr, odometry_data=delta_odom, lora_depth=dict(k=96, gamma=15, min_norm=.5),
+                                        odometry_weight=0.4,scale_weight=1)
+        # scene.show()
 
-    # save cam2w
-    cam2w = scene.cam2w.cpu().numpy()
-    np.save(os.path.join(ride_path, 'cam2w.npy'), cam2w)
+        # save cam2w
+        cam2w = scene.cam2w.cpu().numpy()
+        np.save(cam2w_file, cam2w)
 
-    # recon_odom = extract_odometry_from_cam2w(scene.cam2w.cpu().numpy())
-    # print(recon_odom)
+        shutil.rmtree(outdir)
+
+    else:
+        logging.info(f"Loading pose for {ride_path}, {start_idx} to {end_idx} from {cam2w_file}")
+        cam2w = np.load(cam2w_file)
+        recon_odom = extract_odometry_from_cam2w(cam2w)
+
+        logging.debug(recon_odom)
+        
+        # Visualize odometry comparison if requested
+        if visualize:
+            selected_pos = odom_data['pos'][recon_idxs]
+            selected_yaw = odom_data['yaw'][recon_idxs]
+            selected_odom_data = {
+                'pos': selected_pos,
+                'yaw': selected_yaw
+            }
+            vis_outdir = os.path.join(outdir, 'odometry_visualization')
+            visualize_odometry_comparison(
+                original_odom_data=selected_odom_data,
+                recon_odom_data=recon_odom,
+                image_files=filelist,
+                output_dir=vis_outdir
+            )
+        
     
-    # # Visualize odometry comparison if requested
-    # if visualize:
-    #     selected_pos = odom_data['pos'][recon_idxs]
-    #     selected_yaw = odom_data['yaw'][recon_idxs]
-    #     selected_odom_data = {
-    #         'pos': selected_pos,
-    #         'yaw': selected_yaw
-    #     }
-    #     vis_outdir = os.path.join(outdir, 'odometry_visualization')
-    #     visualize_odometry_comparison(
-    #         original_odom_data=selected_odom_data,
-    #         recon_odom_data=recon_odom,
-    #         image_files=filelist,
-    #         output_dir=vis_outdir
-    #     )
-    
-    # shutil.rmtree(outdir)
-    
-    return scene.sparse_ga if hasattr(scene, 'sparse_ga') else scene
+    return cam2w
 
 def extract_odometry_from_cam2w(cam2w_matrices):
     """
@@ -485,9 +495,9 @@ def visualize_odometry_comparison(
         plt.savefig(os.path.join(output_dir, f"odometry_comparison_frame_{i:03d}.png"), dpi=150)
         plt.close(fig)
     
-    print(f"Visualization complete. {len(images)} images saved to {output_dir}")
+    logging.info(f"Visualization complete. {len(images)} images saved to {output_dir}")
 
-def main(ride_path, num_threads=4):
+def main(ride_path, num_threads=4, num_process_per_gpu=4, overwrite=False):
     """
     Process multiple ride directories in parallel using multiple GPUs.
     
@@ -495,7 +505,7 @@ def main(ride_path, num_threads=4):
         ride_path: Path containing multiple ride directories
         num_threads: Number of threads/GPUs to use
     """
-    N_THREAD_PER_GPU = 4
+    total_process = num_threads * num_process_per_gpu
     
     # Get all ride directories
     ride_dirs = []
@@ -503,40 +513,61 @@ def main(ride_path, num_threads=4):
         if os.path.isdir(os.path.join(ride_path, dir)):
             ride_dirs.append(os.path.join(ride_path, dir))
     
-    # Split directories into chunks for each thread
-    chunks = [[] for _ in range(num_threads*N_THREAD_PER_GPU)]
+    # Split directories into chunks for each process
+    chunks = [[] for _ in range(total_process)]
     for i, dir_path in enumerate(ride_dirs):
-        chunks[i % (num_threads*N_THREAD_PER_GPU)].append(dir_path)
+        chunks[i % total_process].append(dir_path)
     
-    # Define worker function for each thread
+    # Define worker function for each process
     def worker(dirs, gpu_id):
         device = f"cuda:{gpu_id}"
-        print(f"Thread {gpu_id} processing {len(dirs)} directories on {device}")
+        logging.info(f"Process {gpu_id} processing {len(dirs)} directories on {device}")
         for dir_path in dirs:
             try:
-                print(f"Processing {dir_path} on {device}")
-                est_pose(dir_path, device=device)
+                logging.info(f"Processing {dir_path} on {device}")
+                # list all images files
+                image_files = os.listdir(os.path.join(dir_path, 'imgs'))
+                n_segments = len(image_files) // 100
+                for i in range(n_segments-1):
+                    start_idx = i * 100
+                    end_idx = start_idx + 100
+                    est_pose(dir_path, start_idx, end_idx, device=device, overwrite=overwrite)
+
+                # last two segments
+                start_idx = (n_segments - 1) * 100
+                est_pose(dir_path, start_idx, device=device, overwrite=overwrite)
             except Exception as e:
-                print(f"Error processing {dir_path}: {e}")
+                logging.error(f"Error processing {dir_path}: {e}")
     
-    # Create and start threads
-    threads = []
-    for i in range(num_threads*N_THREAD_PER_GPU):
-        if len(chunks[i]) > 0:  # Only create threads for non-empty chunks
-            t = threading.Thread(target=worker, args=(chunks[i], i // N_THREAD_PER_GPU))
-            threads.append(t)
-            t.start()
+    # Create and start processes
+    processes = []
+    mp.set_start_method('spawn', force=True)  # Use spawn method for better CUDA compatibility
     
-    # Wait for all threads to complete
-    for t in threads:
-        t.join()
+    for i in range(total_process):
+        if len(chunks[i]) > 0:  # Only create processes for non-empty chunks
+            p = mp.Process(target=worker, args=(chunks[i], i // num_process_per_gpu))
+            processes.append(p)
+            p.start()
     
-    print("All processing complete")
+    # Wait for all processes to complete
+    for p in processes:
+        p.join()
+    
+    logging.info("All processing complete")
 
 if __name__ == "__main__":
-    # Example usage with 4 threads/GPUs
-    main("data/filtered_2k", num_threads=1)
-    # Or process a single directory
-    # est_pose("data/filtered_2k/ride_16641_20240119024450", 0, 50, visualize=True)
+    # import argparse
+    # parser = argparse.ArgumentParser()
+    # parser.add_argument("--ride_path", type=str, default="data/filtered_2k")
+    # parser.add_argument("--num_threads", type=int, default=1)
+    # parser.add_argument("--num_process_per_gpu", type=int, default=4)
+    # parser.add_argument("--overwrite", type=bool, default=False)
+    # args = parser.parse_args()
+    # print(args)
+    
+    # main(args.ride_path, args.num_threads, args.num_process_per_gpu, args.overwrite)
+
+    logging.basicConfig(level=logging.INFO)
+    est_pose("data/filtered_2k/ride_16641_20240119024450", 0, 50, visualize=True)
 
 
