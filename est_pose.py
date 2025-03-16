@@ -511,7 +511,7 @@ def worker_process(dirs, gpu_id, overwrite=False):
             n_segments = len(image_files) // 100
             for i in range(n_segments-1):
                 start_idx = i * 100
-                end_idx = start_idx + 100
+                end_idx = start_idx + 110 # overlap 10 frames
                 est_pose(dir_path, start_idx, end_idx, device=device, overwrite=overwrite)
 
             # last two segments
@@ -520,7 +520,7 @@ def worker_process(dirs, gpu_id, overwrite=False):
         except Exception as e:
             logging.error(f"Error processing {dir_path}: {e}")
 
-def main(ride_path, num_threads=4, num_process_per_gpu=4, overwrite=False):
+def main(ride_path, num_process_per_gpu=4, overwrite=False):
     """
     Process multiple ride directories in parallel using multiple GPUs.
     
@@ -528,7 +528,10 @@ def main(ride_path, num_threads=4, num_process_per_gpu=4, overwrite=False):
         ride_path: Path containing multiple ride directories
         num_threads: Number of threads/GPUs to use
     """
-    total_process = num_threads * num_process_per_gpu
+    total_gpus = torch.cuda.device_count()
+    total_process = total_gpus * num_process_per_gpu
+    logging.info(f"Total GPUs: {total_gpus}")
+    logging.info(f"Total processes: {total_process}")
     
     # Get all ride directories
     ride_dirs = []
@@ -544,8 +547,6 @@ def main(ride_path, num_threads=4, num_process_per_gpu=4, overwrite=False):
     # Create and start processes
     processes = []
     mp.set_start_method('spawn', force=True)  # Use spawn method for better CUDA compatibility
-    total_gpus = torch.cuda.device_count()
-    logging.info(f"Total GPUs: {total_gpus}")
     
     for i in range(total_process):
         if len(chunks[i]) > 0:  # Only create processes for non-empty chunks
@@ -563,9 +564,8 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--ride_path", type=str, default="data/filtered_2k")
-    parser.add_argument("--num_threads", type=int, default=1)
     parser.add_argument("--num_process_per_gpu", type=int, default=4)
-    parser.add_argument("--overwrite", type=bool, default=False)
+    parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--test", action="store_true")
     args = parser.parse_args()
     print(args)
@@ -573,6 +573,6 @@ if __name__ == "__main__":
     if args.test:
         est_pose("data/filtered_2k/ride_16641_20240119024450", 0, 50, visualize=True)
     else:
-        main(args.ride_path, args.num_threads, args.num_process_per_gpu, args.overwrite)
+        main(args.ride_path, args.num_process_per_gpu, args.overwrite)
 
 
