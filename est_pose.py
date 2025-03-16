@@ -499,6 +499,27 @@ def visualize_odometry_comparison(
     
     logging.info(f"Visualization complete. {len(images)} images saved to {output_dir}")
 
+# Define worker function for multiprocessing
+def worker_process(dirs, gpu_id, overwrite=False):
+    device = f"cuda:{gpu_id}"
+    logging.info(f"Process {gpu_id} processing {len(dirs)} directories on {device}")
+    for dir_path in dirs:
+        try:
+            logging.info(f"Processing {dir_path} on {device}")
+            # list all images files
+            image_files = os.listdir(os.path.join(dir_path, 'img'))
+            n_segments = len(image_files) // 100
+            for i in range(n_segments-1):
+                start_idx = i * 100
+                end_idx = start_idx + 100
+                est_pose(dir_path, start_idx, end_idx, device=device, overwrite=overwrite)
+
+            # last two segments
+            start_idx = (n_segments - 1) * 100
+            est_pose(dir_path, start_idx, device=device, overwrite=overwrite)
+        except Exception as e:
+            logging.error(f"Error processing {dir_path}: {e}")
+
 def main(ride_path, num_threads=4, num_process_per_gpu=4, overwrite=False):
     """
     Process multiple ride directories in parallel using multiple GPUs.
@@ -520,27 +541,6 @@ def main(ride_path, num_threads=4, num_process_per_gpu=4, overwrite=False):
     for i, dir_path in enumerate(ride_dirs):
         chunks[i % total_process].append(dir_path)
     
-    # Define worker function for each process
-    def worker(dirs, gpu_id):
-        device = f"cuda:{gpu_id}"
-        logging.info(f"Process {gpu_id} processing {len(dirs)} directories on {device}")
-        for dir_path in dirs:
-            try:
-                logging.info(f"Processing {dir_path} on {device}")
-                # list all images files
-                image_files = os.listdir(os.path.join(dir_path, 'imgs'))
-                n_segments = len(image_files) // 100
-                for i in range(n_segments-1):
-                    start_idx = i * 100
-                    end_idx = start_idx + 100
-                    est_pose(dir_path, start_idx, end_idx, device=device, overwrite=overwrite)
-
-                # last two segments
-                start_idx = (n_segments - 1) * 100
-                est_pose(dir_path, start_idx, device=device, overwrite=overwrite)
-            except Exception as e:
-                logging.error(f"Error processing {dir_path}: {e}")
-    
     # Create and start processes
     processes = []
     mp.set_start_method('spawn', force=True)  # Use spawn method for better CUDA compatibility
@@ -549,7 +549,7 @@ def main(ride_path, num_threads=4, num_process_per_gpu=4, overwrite=False):
     
     for i in range(total_process):
         if len(chunks[i]) > 0:  # Only create processes for non-empty chunks
-            p = mp.Process(target=worker, args=(chunks[i], i % total_gpus))
+            p = mp.Process(target=worker_process, args=(chunks[i], i % total_gpus, overwrite))
             processes.append(p)
             p.start()
     
