@@ -15,7 +15,7 @@ import torch.multiprocessing as mp
 import matplotlib.pyplot as plt
 import cv2
 import logging
-
+import torch
 logging.basicConfig(level=logging.INFO)
 
 def est_pose(ride_path, start_idx=0, end_idx=None, interval=1, 
@@ -544,10 +544,12 @@ def main(ride_path, num_threads=4, num_process_per_gpu=4, overwrite=False):
     # Create and start processes
     processes = []
     mp.set_start_method('spawn', force=True)  # Use spawn method for better CUDA compatibility
+    total_gpus = torch.cuda.device_count()
+    logging.info(f"Total GPUs: {total_gpus}")
     
     for i in range(total_process):
         if len(chunks[i]) > 0:  # Only create processes for non-empty chunks
-            p = mp.Process(target=worker, args=(chunks[i], i // num_process_per_gpu))
+            p = mp.Process(target=worker, args=(chunks[i], i % total_gpus))
             processes.append(p)
             p.start()
     
