@@ -16,6 +16,8 @@ import matplotlib.pyplot as plt
 import cv2
 import logging
 
+logging.basicConfig(level=logging.INFO)
+
 def est_pose(ride_path, start_idx=0, end_idx=None, interval=1, 
              visualize=True, device="cuda", overwrite=False):
     """
@@ -556,18 +558,19 @@ def main(ride_path, num_threads=4, num_process_per_gpu=4, overwrite=False):
     logging.info("All processing complete")
 
 if __name__ == "__main__":
-    # import argparse
-    # parser = argparse.ArgumentParser()
-    # parser.add_argument("--ride_path", type=str, default="data/filtered_2k")
-    # parser.add_argument("--num_threads", type=int, default=1)
-    # parser.add_argument("--num_process_per_gpu", type=int, default=4)
-    # parser.add_argument("--overwrite", type=bool, default=False)
-    # args = parser.parse_args()
-    # print(args)
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ride_path", type=str, default="data/filtered_2k")
+    parser.add_argument("--num_threads", type=int, default=1)
+    parser.add_argument("--num_process_per_gpu", type=int, default=4)
+    parser.add_argument("--overwrite", type=bool, default=False)
+    parser.add_argument("--test", action="store_true")
+    args = parser.parse_args()
+    print(args)
     
-    # main(args.ride_path, args.num_threads, args.num_process_per_gpu, args.overwrite)
-
-    logging.basicConfig(level=logging.INFO)
-    est_pose("data/filtered_2k/ride_16641_20240119024450", 0, 50, visualize=True)
+    if args.test:
+        est_pose("data/filtered_2k/ride_16641_20240119024450", 0, 50, visualize=True)
+    else:
+        main(args.ride_path, args.num_threads, args.num_process_per_gpu, args.overwrite)
 
 
