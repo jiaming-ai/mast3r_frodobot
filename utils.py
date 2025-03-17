@@ -126,4 +126,5 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dir_path", type=str, default="data/filtered_2k")
     args = parser.parse_args()
-    check_progress(args.dir_path)
+    res = check_progress(args.dir_path)
+    print(res)
