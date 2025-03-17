@@ -2,14 +2,12 @@ import os
 import logging
 import numpy as np
 
-def check_progress(dir_path, start_idx=0, end_idx=None):
+def check_progress(dir_path):
     """
     Check the progress of pose estimation across all ride directories.
     
     Args:
         dir_path: Path containing multiple ride directories
-        start_idx: Starting index for checking (default: 0)
-        end_idx: Ending index for checking (default: None, means all images)
         
     Returns:
         Dictionary with progress statistics
@@ -21,6 +19,8 @@ def check_progress(dir_path, start_idx=0, end_idx=None):
     total_rides = 0
     total_segments = 0
     completed_segments = 0
+    start_idx = 0
+    end_idx = None
     rides_stats = []
     
     # Get all ride directories
@@ -45,10 +45,7 @@ def check_progress(dir_path, start_idx=0, end_idx=None):
         image_files = [f for f in os.listdir(img_dir) 
                       if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
         
-        if end_idx is None:
-            actual_end_idx = len(image_files)
-        else:
-            actual_end_idx = min(end_idx, len(image_files))
+        actual_end_idx = len(image_files)
         
         # Calculate number of segments (following the logic in worker_process)
         n_segments = len(image_files) // 100
@@ -123,3 +120,10 @@ def check_progress(dir_path, start_idx=0, end_idx=None):
         'rides_stats': rides_stats,
         'incomplete_rides': incomplete_rides
     }
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dir_path", type=str, default="data/filtered_2k")
+    args = parser.parse_args()
+    check_progress(args.dir_path)
