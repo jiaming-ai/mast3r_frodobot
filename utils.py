@@ -74,6 +74,7 @@ def check_progress(dir_path):
             # Check if this segment has been processed
             cam2w_file = os.path.join(ride_dir, f'cam2w_{segment_start_idx}_{segment_end_idx}.npy')
             if os.path.exists(cam2w_file):
+                print(f"ride: {ride_name}, segment: {segment_start_idx} - {segment_end_idx}")
                 ride_completed += 1
                 completed_segments += 1
         
@@ -107,17 +108,17 @@ def check_progress(dir_path):
     # Sort rides by completion percentage
     rides_stats.sort(key=lambda x: x['completion_percentage'])
     
+    
+    # # Print details for incomplete rides (less than 100% complete)
+    incomplete_rides = [r for r in rides_stats if r['completion_percentage'] < 100]
+    # if incomplete_rides:
+    #     logging.info(f"Incomplete rides ({len(incomplete_rides)}):")
+    #     for ride in incomplete_rides:
+    #         logging.info(f"  {ride['ride_name']}: {ride['completed_segments']}/{ride['total_segments']} "
+    #                     f"({ride['completion_percentage']:.2f}%)")
     # Print summary
     logging.info(f"Overall progress: {completed_segments}/{total_segments} segments completed ({overall_completion_pct:.2f}%)")
     logging.info(f"Total rides: {total_rides}")
-    
-    # Print details for incomplete rides (less than 100% complete)
-    incomplete_rides = [r for r in rides_stats if r['completion_percentage'] < 100]
-    if incomplete_rides:
-        logging.info(f"Incomplete rides ({len(incomplete_rides)}):")
-        for ride in incomplete_rides:
-            logging.info(f"  {ride['ride_name']}: {ride['completed_segments']}/{ride['total_segments']} "
-                        f"({ride['completion_percentage']:.2f}%)")
     
     return {
         'total_rides': total_rides,
