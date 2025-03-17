@@ -190,7 +190,7 @@ def est_pose(ride_path, start_idx=0, end_idx=None, interval=1,
                                         opt_depth='depth' in optim_level, shared_intrinsics=shared_intrinsics,
                                         matching_conf_thr=matching_conf_thr, odometry_data=delta_odom, lora_depth=dict(k=96, gamma=15, min_norm=.5),
                                         odometry_weight=0.4,scale_weight=1)
-        # scene.show()
+        scene.show()
 
         # save cam2w
         cam2w = scene.cam2w.cpu().numpy()
@@ -202,8 +202,8 @@ def est_pose(ride_path, start_idx=0, end_idx=None, interval=1,
         logging.info(f"Loading pose for {ride_path}, {start_idx} to {end_idx} from {cam2w_file}")
         cam2w = np.load(cam2w_file)
         recon_odom = extract_odometry_from_cam2w(cam2w)
+        print(recon_odom)
 
-        logging.debug(recon_odom)
         
         # Visualize odometry comparison if requested
         if visualize:
@@ -263,16 +263,7 @@ def extract_odometry_from_cam2w(cam2w_matrices):
         # In odometry frame, yaw is rotation from x to y
         # In OpenCV, this corresponds to rotation from z to -x
         
-        # Get the forward direction in odometry (z-axis in OpenCV)
-        forward_vec = R[:, 2]  # z-axis in OpenCV
-        
-        
-        # Project vectors to the horizontal plane (x-y in odometry, z-x in OpenCV)
-        forward_2d = np.array([forward_vec[0], forward_vec[2]])  # [x_odo, y_odo]
-
         yaw = np.arctan2(R[0, 2], R[2, 2])
-        # Calculate yaw as the angle between the forward vector and the x-axis
-        # yaw = np.arctan2(forward_2d[1], forward_2d[0])
         yaws.append(yaw)
     
     # Make positions and orientations relative to the first frame
@@ -280,8 +271,8 @@ def extract_odometry_from_cam2w(cam2w_matrices):
     origin_yaw = yaws[0]
     
     # Create transformation matrix for the origin (first frame)
-    cos_origin = np.cos(-origin_yaw)
-    sin_origin = np.sin(-origin_yaw)
+    cos_origin = np.cos(origin_yaw)
+    sin_origin = np.sin(origin_yaw)
     
     # Initialize relative positions and yaws
     relative_positions = []
@@ -564,14 +555,14 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--ride_path", type=str, default="data/filtered_2k")
-    parser.add_argument("--num_process_per_gpu", type=int, default=4)
+    parser.add_argument("--num_process_per_gpu", type=int, default=2)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--test", action="store_true")
     args = parser.parse_args()
     print(args)
     
     if args.test:
-        est_pose("data/filtered_2k/ride_16641_20240119024450", 0, 50, visualize=True)
+        est_pose("data/frodobot_8k_1/ride_58248_e7808b_20240617121334", 0, 100, visualize=True)
     else:
         main(args.ride_path, args.num_process_per_gpu, args.overwrite)
 
