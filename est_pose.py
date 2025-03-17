@@ -1,3 +1,4 @@
+from datetime import time
 import os
 import threading
 import pickle
@@ -19,7 +20,7 @@ import torch
 logging.basicConfig(level=logging.INFO)
 
 def est_pose(ride_path, start_idx=0, end_idx=None, interval=1, 
-             visualize=True, device="cuda", overwrite=False):
+             visualize=True, device="cuda", overwrite=False, model=None, show_scene=False):
     """
     Load a ride from a directory and reconstruct the scene.
     
@@ -182,15 +183,17 @@ def est_pose(ride_path, start_idx=0, end_idx=None, interval=1,
     
         # Run sparse global alignment
         # Load model
-        model_name = "MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric"
-        weights_path = "naver/" + model_name
-        model = AsymmetricMASt3R.from_pretrained(weights_path).to(device)
+        if model is None:
+            model_name = "MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric"
+            weights_path = "naver/" + model_name
+            model = AsymmetricMASt3R.from_pretrained(weights_path).to(device)
         scene = sparse_global_alignment(filelist, pairs, cache_dir,
                                         model, lr1=lr1, niter1=niter1, lr2=lr2, niter2=niter2, device=device,
                                         opt_depth='depth' in optim_level, shared_intrinsics=shared_intrinsics,
                                         matching_conf_thr=matching_conf_thr, odometry_data=delta_odom, lora_depth=dict(k=96, gamma=15, min_norm=.5),
                                         odometry_weight=0.4,scale_weight=1)
-        scene.show()
+        if show_scene:
+            scene.show()
 
         # save cam2w
         cam2w = scene.cam2w.cpu().numpy()
@@ -492,8 +495,19 @@ def visualize_odometry_comparison(
 
 # Define worker function for multiprocessing
 def worker_process(dirs, gpu_id, overwrite=False):
+    time.sleep(gpu_id * 0.5)
     device = f"cuda:{gpu_id}"
+    torch.cuda.set_device(gpu_id)  # Explicitly set the device
+    
+    # Empty cache before starting work
+    torch.cuda.empty_cache()
+    
     logging.info(f"Process {gpu_id} processing {len(dirs)} directories on {device}")
+    # Load model once per process
+    model_name = "MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric"
+    weights_path = "naver/" + model_name
+    model = AsymmetricMASt3R.from_pretrained(weights_path).to(device)
+    
     for dir_path in dirs:
         try:
             logging.info(f"Processing {dir_path} on {device}")
@@ -503,7 +517,7 @@ def worker_process(dirs, gpu_id, overwrite=False):
             for i in range(n_segments-1):
                 start_idx = i * 100
                 end_idx = start_idx + 110 # overlap 10 frames
-                est_pose(dir_path, start_idx, end_idx, device=device, overwrite=overwrite)
+                est_pose(dir_path, start_idx, end_idx, device=device, overwrite=overwrite, model=model)
 
             # last two segments
             start_idx = (n_segments - 1) * 100
@@ -562,7 +576,7 @@ if __name__ == "__main__":
     print(args)
     
     if args.test:
-        est_pose("data/frodobot_8k_1/ride_58248_e7808b_20240617121334", 0, 100, visualize=True)
+        est_pose("data/frodobot_8k_1/ride_58248_e7808b_20240617121334", 0, 100, visualize=True, show_scene=True)
     else:
         main(args.ride_path, args.num_process_per_gpu, args.overwrite)
 
