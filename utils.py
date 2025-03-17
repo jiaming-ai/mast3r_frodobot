@@ -2,6 +2,13 @@ import os
 import logging
 import numpy as np
 
+logging.basicConfig(
+    handlers=[logging.StreamHandler()],
+    level=logging.INFO, 
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
 def check_progress(dir_path):
     """
     Check the progress of pose estimation across all ride directories.
@@ -127,4 +134,3 @@ if __name__ == "__main__":
     parser.add_argument("--dir_path", type=str, default="data/filtered_2k")
     args = parser.parse_args()
     res = check_progress(args.dir_path)
-    print(res)
