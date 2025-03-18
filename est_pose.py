@@ -208,13 +208,13 @@ def est_pose(ride_path, start_idx=0, end_idx=None, interval=1,
 
     else:
         logging.info(f"Loading pose for {ride_path}, {start_idx} to {end_idx} from {cam2w_file}")
-        cam2w = np.load(cam2w_file)
-        recon_odom = extract_odometry_from_cam2w(cam2w)
-        print(recon_odom)
 
-        
         # Visualize odometry comparison if requested
         if visualize:
+            cam2w = np.load(cam2w_file)
+            recon_odom = extract_odometry_from_cam2w(cam2w)
+            print(recon_odom)
+
             selected_pos = odom_data['pos'][recon_idxs]
             selected_yaw = odom_data['yaw'][recon_idxs]
             selected_odom_data = {
