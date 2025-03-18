@@ -129,9 +129,78 @@ def check_progress(dir_path):
         'incomplete_rides': incomplete_rides
     }
 
+def fix_nested_ride_directories(dir_path, correct_structure=False):
+    """
+    Identifies and optionally fixes incorrectly nested ride directories.
+    
+    Looks for structure like:
+    data/ride_ID/ride_ID (where the inner folder contains the actual ride data)
+    
+    Args:
+        dir_path: Path containing ride directories
+        correct_structure: If True, fixes the structure by moving inner directories up
+                          If False, only reports issues without making changes
+    
+    Returns:
+        List of directories that were fixed or need fixing
+    """
+    logging.info(f"Checking for nested ride directories in {dir_path}")
+    
+    issues_found = []
+    
+    # Get all directories in the path
+    for dir_name in os.listdir(dir_path):
+        parent_dir_path = os.path.join(dir_path, dir_name)
+        
+        # Skip if not a directory
+        if not os.path.isdir(parent_dir_path):
+            continue
+            
+        # Check if this directory has no img folder but contains a subdirectory with the same name
+        if not os.path.exists(os.path.join(parent_dir_path, 'img')):
+            # Check if there's a subdirectory with the same name
+            sub_dir_path = os.path.join(parent_dir_path, dir_name)
+            if os.path.isdir(sub_dir_path) and os.path.exists(os.path.join(sub_dir_path, 'img')):
+                issues_found.append(parent_dir_path)
+                
+                if correct_structure:
+                    logging.info(f"Fixing nested structure for {dir_name}")
+                    
+                    # Create a temporary name for the parent directory
+                    temp_parent_dir = f"{parent_dir_path}_temp"
+                    
+                    try:
+                        # 1. Rename parent directory to temporary name
+                        os.rename(parent_dir_path, temp_parent_dir)
+                        
+                        # 2. Move the inner directory to the original location
+                        os.rename(os.path.join(temp_parent_dir, dir_name), parent_dir_path)
+                        
+                        # 3. Remove the now-empty temporary parent directory
+                        os.rmdir(temp_parent_dir)
+                        
+                        logging.info(f"Successfully fixed structure for {dir_name}")
+                    except Exception as e:
+                        logging.error(f"Error fixing structure for {dir_name}: {str(e)}")
+                else:
+                    logging.info(f"Found nested structure issue: {dir_name} (use --correct_structure to fix)")
+    
+    return issues_found
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--dir_path", type=str, default="data/filtered_2k")
+    parser.add_argument("--correct_structure", action="store_true", 
+                        help="Fix nested ride directory structure if found")
     args = parser.parse_args()
+    
+    # Check progress
     res = check_progress(args.dir_path)
+    
+    # Check and optionally fix nested directories
+    fixed_dirs = fix_nested_ride_directories(args.dir_path, args.correct_structure)
+    if fixed_dirs:
+        logging.info(f"Found {len(fixed_dirs)} directories with nested structure issues")
+    else:
+        logging.info("No nested directory structure issues found")
