@@ -514,21 +514,21 @@ def worker_process(dirs, gpu_id, overwrite=False):
     model = AsymmetricMASt3R.from_pretrained(weights_path).to(device)
     
     for dir_path in dirs:
-        try:
-            logging.info(f"Processing {dir_path} on {device}")
-            # list all images files
-            image_files = os.listdir(os.path.join(dir_path, 'img'))
-            n_segments = len(image_files) // 100
-            for i in range(n_segments-1):
-                start_idx = i * 100
-                end_idx = start_idx + 110 # overlap 10 frames
-                est_pose(dir_path, start_idx, end_idx, device=device, overwrite=overwrite, model=model)
+        # try:
+        logging.info(f"Processing {dir_path} on {device}")
+        # list all images files
+        image_files = os.listdir(os.path.join(dir_path, 'img'))
+        n_segments = len(image_files) // 100
+        for i in range(n_segments-1):
+            start_idx = i * 100
+            end_idx = start_idx + 110 # overlap 10 frames
+            est_pose(dir_path, start_idx, end_idx, device=device, overwrite=overwrite, model=model)
 
-            # last two segments
-            start_idx = (n_segments - 1) * 100
-            est_pose(dir_path, start_idx, device=device, overwrite=overwrite)
-        except Exception as e:
-            logging.error(f"Error processing {dir_path}: {e}")
+        # last two segments
+        start_idx = (n_segments - 1) * 100
+        est_pose(dir_path, start_idx, device=device, overwrite=overwrite)
+        # except Exception as e:
+        #     logging.error(f"Error processing {dir_path}: {e}")
 
 def main(ride_path, num_process_per_gpu=4, overwrite=False):
     """
