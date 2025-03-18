@@ -1,5 +1,5 @@
-from datetime import time
 import os
+import time
 import threading
 import pickle
 import shutil
@@ -40,6 +40,11 @@ def est_pose(ride_path, start_idx=0, end_idx=None, interval=1,
 
     # Load images
     image_dir = os.path.join(ride_path, 'img')
+
+    if not os.path.exists(image_dir):
+        logging.error(f"Image directory {image_dir} does not exist")
+        return
+    
     all_img_files = [os.path.join(image_dir, f) for f in os.listdir(image_dir) 
                 if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
     if end_idx is None:
